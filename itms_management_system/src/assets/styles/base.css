@@ -1,0 +1,33 @@
+:root {
+  --layout-bg: #f5f7fa;
+  --layout-border: #e4e7ed;
+  --brand-color: #1677ff;
+  --text-primary: #303133;
+  --text-secondary: #909399;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background-color: var(--layout-bg);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.el-container {
+  min-height: 100vh;
+}
