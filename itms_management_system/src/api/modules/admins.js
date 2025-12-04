@@ -1,13 +1,8 @@
 import request from '@/api/request'
 
-// 查询所有角色
-export function queryAllRoles() {
-  return request.get('/roles/list')
-}
-
 // 查询所有管理员用户
-export function queryAllAdmins() {
-  return request.get('/admins/list')
+export function queryAllAdmins(params = {}) {
+  return request.get('/admins/list', { params })
 }
 
 // 新增管理员

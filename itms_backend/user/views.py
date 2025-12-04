@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.db import connection, transaction
+from django.db.models import Q
 
 from .models import AdminUser, Permission, AppUser, Device, UserRole, RolePermission, Role
 from .generate_key import _generate_access_key
@@ -121,6 +122,32 @@ def _resolve_roles_from_payload(data, *, required=True, allow_default=False):
     if required:
         return None, JsonResponse({'message': '请至少选择一个角色'}, status=400)
     return [], None
+
+
+def _parse_pagination_params(request, default_page=1, default_size=10, max_size=200):
+    """解析分页参数，支持 page/page_size 或 page/pageSize。"""
+    try:
+        page = int(request.GET.get('page', default_page))
+    except (TypeError, ValueError):
+        page = default_page
+    if page < 1:
+        page = 1
+
+    size_param = request.GET.get('page_size')
+    if size_param is None:
+        size_param = request.GET.get('pageSize')
+    try:
+        page_size = int(size_param or default_size)
+    except (TypeError, ValueError):
+        page_size = default_size
+
+    if page_size < 1:
+        page_size = 1
+
+    if max_size and page_size > max_size:
+        page_size = max_size
+
+    return page, page_size
 
 
 def _generate_token(user: AdminUser):
@@ -663,6 +690,9 @@ def query_users(request):
     # 获取查询参数
     phone = request.GET.get('phone', '').strip()
     email = request.GET.get('email', '').strip()
+    username = request.GET.get('username', '').strip()
+    role = (request.GET.get('role') or request.GET.get('app_role') or '').strip()
+    online_status = (request.GET.get('onlineStatus') or '').strip().lower()
     page_num = request.GET.get('pageNum', '1')
     page_size = request.GET.get('pageSize', '10')
 
@@ -689,6 +719,14 @@ def query_users(request):
         queryset = queryset.filter(phone__icontains=phone)
     if email:
         queryset = queryset.filter(email__icontains=email)
+    if username:
+        queryset = queryset.filter(username__icontains=username)
+    if role:
+        queryset = queryset.filter(app_role=role)
+    if online_status == 'online':
+        queryset = queryset.filter(is_online=1)
+    elif online_status == 'offline':
+        queryset = queryset.filter(is_online=0)
 
     # 获取总数
     total = queryset.count()
@@ -836,7 +874,26 @@ def list_roles(request):
     if request.method != 'GET':
         return JsonResponse({'message': 'Method not allowed'}, status=405)
 
-    roles = Role.objects.all().order_by('role_id')
+    keyword = (request.GET.get('keyword') or '').strip()
+    role_name_param = (request.GET.get('role_name') or request.GET.get('roleName') or '').strip()
+    role_key_param = (request.GET.get('role_key') or request.GET.get('roleKey') or '').strip()
+    page, page_size = _parse_pagination_params(request)
+
+    roles_qs = Role.objects.all().order_by('role_id')
+    if role_name_param:
+        roles_qs = roles_qs.filter(role_name__icontains=role_name_param)
+    if role_key_param:
+        roles_qs = roles_qs.filter(role_key__icontains=role_key_param)
+    if keyword and not (role_name_param or role_key_param):
+        roles_qs = roles_qs.filter(
+            Q(role_name__icontains=keyword) | Q(role_key__icontains=keyword)
+        )
+
+    total = roles_qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    roles = roles_qs[start:end]
+
     role_list = []
     for role in roles:
         role_list.append({
@@ -845,7 +902,14 @@ def list_roles(request):
             'role_key': role.role_key,
             'status': 1 if role.status else 0,
         })
-    return JsonResponse({'roles': role_list})
+    return JsonResponse({
+        'roles': role_list,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+        }
+    })
 
 
 @csrf_exempt
@@ -1029,7 +1093,32 @@ def list_admins(request):
     if request.method != 'GET':
         return JsonResponse({'message': 'Method not allowed'}, status=405)
 
-    admins = AdminUser.objects.all()
+    phone = (request.GET.get('phone') or '').strip()
+    email = (request.GET.get('email') or '').strip()
+    keyword = (request.GET.get('keyword') or '').strip()
+    role_key = (request.GET.get('role_key') or request.GET.get('roleKey') or '').strip()
+    page, page_size = _parse_pagination_params(request)
+
+    admins_qs = AdminUser.objects.all().order_by('user_id')
+    if phone:
+        admins_qs = admins_qs.filter(phone__icontains=phone)
+    if email:
+        admins_qs = admins_qs.filter(email__icontains=email)
+    if keyword and not (phone or email):
+        admins_qs = admins_qs.filter(
+            Q(phone__icontains=keyword)
+            | Q(email__icontains=keyword)
+            | Q(username__icontains=keyword)
+        )
+    if role_key:
+        admins_qs = admins_qs.filter(roles__role_key=role_key)
+
+    admins_qs = admins_qs.distinct()
+    total = admins_qs.count()
+    start = (page - 1) * page_size
+    end = start + page_size
+    admins = admins_qs[start:end]
+
     admin_list = []
     for admin in admins:
         roles_qs = admin.roles.filter(status=1)
@@ -1053,7 +1142,14 @@ def list_admins(request):
         })
     print(f"Retrieved admins: {admin_list}")
 
-    return JsonResponse({'admins': admin_list})
+    return JsonResponse({
+        'admins': admin_list,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+        }
+    })
 
 @csrf_exempt
 def admin_permissions(request, user_id):

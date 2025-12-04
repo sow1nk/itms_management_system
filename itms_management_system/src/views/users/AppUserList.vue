@@ -1,7 +1,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { addAppUser, updateAppUser, queryAllAppUsers, queryById, queryAppUsers, updateAppUserStatus, assignDevicesToUser, resetAppUserKey } from '@/api/modules/users'
+import { addAppUser, updateAppUser, queryById, queryAppUsers, updateAppUserStatus, assignDevicesToUser, resetAppUserKey } from '@/api/modules/users'
 import { fetchDeviceList } from '@/api/modules/devices'
 import { useUserStore } from '@/store/modules/user'
 import { usePermission } from '@/composables/usePermission'
@@ -20,6 +20,12 @@ const filterForm = reactive({
   username: '',
   role: '',
   onlineStatus: '',
+})
+
+const pagination = ref({
+  page: 1,
+  pageSize: 10,
+  total: 0,
 })
 
 const roleOptions = [
@@ -112,12 +118,40 @@ const transformUsers = (list = []) =>
     }
   })
 
+const buildQueryParams = () => {
+  const phone = filterForm.phone.trim()
+  const email = filterForm.email.trim()
+  const username = filterForm.username.trim()
+  const role = filterForm.role || ''
+  const onlineStatus = filterForm.onlineStatus || ''
+
+  return {
+    phone: phone || undefined,
+    email: email || undefined,
+    username: username || undefined,
+    role: role || undefined,
+    onlineStatus: onlineStatus || undefined,
+    pageNum: pagination.value.page,
+    pageSize: pagination.value.pageSize,
+  }
+}
+
 const loadData = async () => {
   loading.value = true
   try {
-    const response = await queryAllAppUsers()
+    const params = buildQueryParams()
+    const response = await queryAppUsers(params)
     const list = Array.isArray(response) ? response : response?.users || []
     users.value = transformUsers(list)
+
+    pagination.value = {
+      page: response?.pageNum || response?.page || pagination.value.page,
+      pageSize: response?.pageSize || response?.page_size || pagination.value.pageSize,
+      total: response?.total ?? (Array.isArray(list) ? list.length : 0),
+    }
+  } catch (error) {
+    console.error(error)
+    ElMessage.error('加载用户数据失败')
   } finally {
     loading.value = false
   }
@@ -125,26 +159,9 @@ const loadData = async () => {
 
 onMounted(loadData)
 
-const handleSearch = async () => {
-  const phone = filterForm.phone.trim()
-  const email = filterForm.email.trim()
-
-  if (!phone && !email) {
-    await loadData()
-    return
-  }
-
-  loading.value = true
-  try {
-    const response = await queryAppUsers(phone || undefined, email || undefined)
-    const list = Array.isArray(response) ? response : response?.users || []
-    users.value = transformUsers(list)
-  } catch (error) {
-    console.error(error)
-    ElMessage.error('查询失败，请稍后重试')
-  } finally {
-    loading.value = false
-  }
+const handleSearch = () => {
+  pagination.value.page = 1
+  loadData()
 }
 
 const handleReset = () => {
@@ -153,6 +170,18 @@ const handleReset = () => {
   filterForm.username = ''
   filterForm.role = ''
   filterForm.onlineStatus = ''
+  pagination.value.page = 1
+  loadData()
+}
+
+const handlePageChange = (page) => {
+  pagination.value.page = page
+  loadData()
+}
+
+const handlePageSizeChange = (size) => {
+  pagination.value.pageSize = size
+  pagination.value.page = 1
   loadData()
 }
 
@@ -539,6 +568,19 @@ watch(
         </template>
       </el-table-column>
     </el-table>
+
+    <div class="table-pagination" v-if="pagination.total > 0">
+      <el-pagination
+        background
+        layout="total, prev, pager, next, sizes"
+        :current-page="pagination.page"
+        :page-size="pagination.pageSize"
+        :total="pagination.total"
+        :page-sizes="[10, 20, 50, 100]"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
+      />
+    </div>
   </el-card>
 
   <el-dialog v-model="assignDialogVisible" title="分配设备" width="520px" destroy-on-close>
@@ -629,6 +671,12 @@ watch(
 
 .filter-form .el-select {
   width: 160px;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 .user-meta {

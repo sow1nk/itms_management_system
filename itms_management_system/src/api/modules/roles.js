@@ -1,8 +1,8 @@
 import request from '@/api/request'
 
 // 查询所有角色
-export function queryAllRoles() {
-  return request.get('/roles/list')
+export function queryAllRoles(params = {}) {
+  return request.get('/roles/list', { params })
 }
 
 // 查询单个角色详情

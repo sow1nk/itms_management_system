@@ -81,6 +81,20 @@ const editFormRules = {
 }
 const editLoading = ref(false)
 
+const queryParams = ref({
+  phone: '',
+  email: '',
+  role_key: '',
+  page: 1,
+  pageSize: 10,
+})
+
+const pagination = ref({
+  page: 1,
+  pageSize: 10,
+  total: 0,
+})
+
 
 const normalizeStatus = (status) => {
   if (typeof status === 'boolean') {
@@ -131,7 +145,7 @@ const normalizeRoleList = (admin) => {
 const loadRoleOptions = async () => {
   roleOptionsLoading.value = true
   try {
-    const data = await queryAllRoles()
+    const data = await queryAllRoles({ page: 1, page_size: 999 })
     const options = (data?.roles || []).map(role => ({
       ...role,
       disabled: role.status !== 1,
@@ -175,7 +189,14 @@ const getRoleTagType = (roleKey) => {
 const loadData = async () => {
   loading.value = true
   try {
-    const data = await queryAllAdmins()
+    const params = {
+      phone: queryParams.value.phone || undefined,
+      email: queryParams.value.email || undefined,
+      role_key: queryParams.value.role_key || undefined,
+      page: queryParams.value.page,
+      page_size: queryParams.value.pageSize,
+    }
+    const data = await queryAllAdmins(params)
     console.log('管理员列表数据:', data)
 
     // 从返回的数据中提取 admins 数组，并转换数据格式
@@ -192,6 +213,13 @@ const loadData = async () => {
       admins.value = []
     }
 
+    const paginationData = data?.pagination || {}
+    pagination.value = {
+      page: paginationData.page || queryParams.value.page,
+      pageSize: paginationData.page_size || paginationData.pageSize || queryParams.value.pageSize,
+      total: paginationData.total ?? (data?.admins ? data.admins.length : 0),
+    }
+
     console.log('转换后的管理员数据:', admins.value)
   } finally {
     loading.value = false
@@ -202,6 +230,29 @@ onMounted(() => {
   loadRoleOptions()
   loadData()
 })
+
+const handleSearch = () => {
+  queryParams.value.page = 1
+  loadData()
+}
+
+const handleResetSearch = () => {
+  queryParams.value.phone = ''
+  queryParams.value.email = ''
+  queryParams.value.role_key = ''
+  handleSearch()
+}
+
+const handlePageChange = (page) => {
+  queryParams.value.page = page
+  loadData()
+}
+
+const handlePageSizeChange = (size) => {
+  queryParams.value.pageSize = size
+  queryParams.value.page = 1
+  loadData()
+}
 
 // 检查是否为当前用户
 const isCurrentUser = (row) => {
@@ -419,6 +470,49 @@ const handleCreateSubmit = async () => {
       </el-button>
     </div>
 
+    <el-form :model="queryParams" inline class="query-form" @submit.prevent>
+      <el-form-item label="手机号">
+        <el-input
+          v-model="queryParams.phone"
+          placeholder="请输入手机号"
+          clearable
+          style="width: 200px"
+          @keyup.enter="handleSearch"
+        />
+      </el-form-item>
+      <el-form-item label="邮箱">
+        <el-input
+          v-model="queryParams.email"
+          placeholder="请输入邮箱"
+          clearable
+          style="width: 200px"
+          @keyup.enter="handleSearch"
+        />
+      </el-form-item>
+      <el-form-item label="角色">
+        <el-select
+          v-model="queryParams.role_key"
+          placeholder="请选择角色"
+          clearable
+          filterable
+          style="width: 250px"
+          @change="handleSearch"
+        >
+          <el-option label="全部" value="" />
+          <el-option
+            v-for="role in roleOptions"
+            :key="role.role_key"
+            :label="role.label"
+            :value="role.role_key"
+          />
+        </el-select>
+      </el-form-item>
+      <el-form-item>
+        <el-button type="primary" @click="handleSearch">查询</el-button>
+        <el-button @click="handleResetSearch">重置</el-button>
+      </el-form-item>
+    </el-form>
+
     <el-table :data="admins" v-loading="loading" border stripe row-key="user_id">
       <!-- 账号列 - 用于登录的账号名 -->
       <el-table-column label="用户 ID" prop="user_id" min-width="140"/>
@@ -475,7 +569,7 @@ const handleCreateSubmit = async () => {
               inactive-value="disabled"
               active-text="启用"
               inactive-text="禁用"
-              :disabled="!canModifyUser(row)"
+              :disabled="!can(PERMISSIONS.SYSTEM_ADMIN.UPDATE) || !canModifyUser(row)"
               @change="(value) => handleStatusChange(value, row)"
             />
             <el-tooltip v-if="!canModifyUser(row)" placement="top">
@@ -512,6 +606,7 @@ const handleCreateSubmit = async () => {
               type="warning"
               link
               size="small"
+              :disabled="!can(PERMISSIONS.SYSTEM_ADMIN.RESET_PASSWORD)"
               @click="handleResetPassword(row)"
             >
               <el-icon><Refresh /></el-icon>
@@ -546,6 +641,19 @@ const handleCreateSubmit = async () => {
         </template>
       </el-table-column>
     </el-table>
+
+    <div class="table-pagination" v-if="pagination.total > 0">
+      <el-pagination
+        background
+        layout="total, prev, pager, next, sizes"
+        :current-page="pagination.page"
+        :page-size="pagination.pageSize"
+        :total="pagination.total"
+        :page-sizes="[10, 20, 50, 100]"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
+      />
+    </div>
   </el-card>
 
   <!-- 新增管理员对话框 -->
@@ -756,6 +864,10 @@ const handleCreateSubmit = async () => {
   gap: 8px;
 }
 
+.query-form {
+  margin-bottom: 12px;
+}
+
 .status-cell {
   display: flex;
   align-items: center;
@@ -779,6 +891,12 @@ const handleCreateSubmit = async () => {
 
 .role-tags .el-tag {
   transition: none;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 /* Switch 样式优化 */

@@ -43,7 +43,8 @@ export const PERMISSIONS = {
     CREATE: 'system_admin:manage:create',       // 创建管理员
     UPDATE: 'system_admin:manage:update',       // 编辑管理员
     DELETE: 'system_admin:manage:delete',       // 删除管理员
-    ASSIGN_PERMISSIONS: 'system_admin:manage:assign_permissions', // 分配权限
+    // ASSIGN_PERMISSIONS: 'system_admin:manage:assign_permissions', // 分配权限
+    RESET_PASSWORD: 'system_admin:manage:reset_password', // 重置密码
   },
   // 系统角色管理权限
   SYSTEM_ROLE: {

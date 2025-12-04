@@ -72,13 +72,13 @@ export const asyncRoutes = [
     name: 'LogsModule',
     component: MainLayout,
     redirect: '/logs/audit',
-    meta: { title: '审计日志', icon: 'Document', permission: ['logs:manage:view'], roles: ['super_admin'] },
+    meta: { title: '审计日志', icon: 'Document', permission: ['logs:manage:view']},
     children: [
       {
         path: 'audit',
         name: 'AuditLogs',
         component: () => import('@/views/logs/AuditLogs.vue'),
-        meta: { title: '操作日志', permission: ['logs:manage:view'], roles: ['super_admin'] },
+        meta: { title: '操作日志', permission: ['logs:manage:view']},
       },
     ],
   },
@@ -88,19 +88,19 @@ export const asyncRoutes = [
     name: 'SystemModule',
     component: MainLayout,
     redirect: '/system/admins',
-    meta: { title: '系统管理', icon: 'Setting', permission: ['system_admin:manage:view'], roles: ['super_admin'] },
+    meta: { title: '系统管理', icon: 'Setting', permission: ['system_admin:manage:view']},
     children: [
       {
         path: 'admins',
         name: 'AdminList',
         component: () => import('@/views/system/AdminList.vue'),
-        meta: { title: '管理员', permission: ['system_admin:manage:view'], roles: ['super_admin'] },
+        meta: { title: '管理员', permission: ['system_admin:manage:view']},
       },
       {
         path: 'roles',
         name: 'RoleList',
         component: () => import('@/views/system/RoleList.vue'),
-        meta: { title: '角色管理', permission: ['system_role:manage:view'], roles: ['super_admin'] },
+        meta: { title: '角色管理', permission: ['system_role:manage:view']},
       },
     ],
   },

@@ -26,15 +26,8 @@ export function queryById(userId) {
 }
 
 // 条件分页查询C端用户
-export function queryAppUsers(phone, email, pageNum, pageSize) {
-  return request.get('/users', {
-    params: {
-      phone,
-      email,
-      pageNum,
-      pageSize
-    }
-  })
+export function queryAppUsers(params = {}) {
+  return request.get('/users', { params })
 }
 
 // 修改C端用户账号状态

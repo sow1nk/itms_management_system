@@ -7,6 +7,17 @@ import { PERMISSIONS, PERMISSION_TREE } from '@/utils/permission'
 
 const loading = ref(false)
 const roles = ref([])
+const queryParams = ref({
+  role_name: '',
+  role_key: '',
+  page: 1,
+  pageSize: 10,
+})
+const pagination = ref({
+  page: 1,
+  pageSize: 10,
+  total: 0,
+})
 
 const normalizeRoleStatus = (status) => {
   if (typeof status === 'number') {
@@ -82,7 +93,13 @@ const checkedPermissions = ref([])
 const loadData = async () => {
   loading.value = true
   try {
-    const data = await queryAllRoles()
+    const params = {
+      role_name: queryParams.value.role_name || undefined,
+      role_key: queryParams.value.role_key || undefined,
+      page: queryParams.value.page,
+      page_size: queryParams.value.pageSize,
+    }
+    const data = await queryAllRoles(params)
     console.log('角色列表数据:', data)
 
     if (data && data.roles) {
@@ -92,6 +109,13 @@ const loadData = async () => {
       }))
     } else {
       roles.value = []
+    }
+
+    const paginationData = data?.pagination || {}
+    pagination.value = {
+      page: paginationData.page || queryParams.value.page,
+      pageSize: paginationData.page_size || paginationData.pageSize || queryParams.value.pageSize,
+      total: paginationData.total ?? (data?.roles ? data.roles.length : 0),
     }
 
     console.log('角色数据:', roles.value)
@@ -104,6 +128,28 @@ const loadData = async () => {
 }
 
 onMounted(loadData)
+
+const handleSearch = () => {
+  queryParams.value.page = 1
+  loadData()
+}
+
+const handleReset = () => {
+  queryParams.value.role_name = ''
+  queryParams.value.role_key = ''
+  handleSearch()
+}
+
+const handlePageChange = (page) => {
+  queryParams.value.page = page
+  loadData()
+}
+
+const handlePageSizeChange = (size) => {
+  queryParams.value.pageSize = size
+  queryParams.value.page = 1
+  loadData()
+}
 
 // 检查是否为超级管理员角色
 const isSuperAdminRole = (row) => {
@@ -315,6 +361,35 @@ const handlePermissionSubmit = async () => {
       </el-button>
     </div>
 
+    <el-form inline class="query-form" @submit.prevent>
+      <el-form-item label="角色名称">
+        <el-input
+          v-model="queryParams.role_name"
+          placeholder="请输入角色名称"
+          clearable
+          style="width: 200px"
+          @keyup.enter="handleSearch"
+        />
+      </el-form-item>
+      <el-form-item label="角色标识">
+        <el-input
+          v-model="queryParams.role_key"
+          placeholder="请输入角色标识"
+          clearable
+          style="width: 200px"
+          @keyup.enter="handleSearch"
+        />
+      </el-form-item>
+      <el-form-item>
+        <el-button type="primary" @click="handleSearch">
+          查询
+        </el-button>
+        <el-button @click="handleReset">
+          重置
+        </el-button>
+      </el-form-item>
+    </el-form>
+
     <el-table :data="roles" v-loading="loading" border stripe>
       <el-table-column label="角色 ID" prop="role_id" min-width="100"/>
       <el-table-column label="角色名称" prop="role_name" min-width="160" />
@@ -382,6 +457,19 @@ const handlePermissionSubmit = async () => {
         </template>
       </el-table-column>
     </el-table>
+
+    <div class="table-pagination" v-if="pagination.total > 0">
+      <el-pagination
+        background
+        layout="total, prev, pager, next, sizes"
+        :current-page="pagination.page"
+        :page-size="pagination.pageSize"
+        :total="pagination.total"
+        :page-sizes="[10, 20, 50, 100]"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
+      />
+    </div>
   </el-card>
 
   <!-- 权限分配对话框 -->
@@ -587,6 +675,16 @@ const handlePermissionSubmit = async () => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.query-form {
+  margin-bottom: 12px;
+}
+
+.table-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
 }
 
 /* 表格样式优化 */
