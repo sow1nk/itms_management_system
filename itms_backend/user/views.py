@@ -1,17 +1,18 @@
 import json
 import uuid
-from django.contrib.auth.hashers import check_password
+from django.contrib.auth.hashers import check_password, make_password
 from django.core import signing
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from django.db import connection
+from django.db import connection, transaction
 
-from .models import AdminUser, Permission, AppUser, Device, UserRole, RolePermission
+from .models import AdminUser, Permission, AppUser, Device, UserRole, RolePermission, Role
 from .generate_key import _generate_access_key
 
 TOKEN_SALT = 'itms-backend-token'
 TOKEN_MAX_AGE = 7 * 24 * 60 * 60  # 7 days
+DEFAULT_PASSWORD = '123456'
 
 
 def _resolve_user_roles(user: AdminUser):
@@ -41,6 +42,85 @@ def _build_user_payload(user: AdminUser):
         'roles': roles,
         'permissions': permissions,
     }
+
+
+def _normalize_status_value(raw_value, default=1):
+    """将各种输入统一转换为 0/1 状态值。"""
+    if raw_value is None:
+        return default
+
+    if isinstance(raw_value, bool):
+        return 1 if raw_value else 0
+
+    if isinstance(raw_value, int):
+        return 1 if raw_value != 0 else 0
+
+    if isinstance(raw_value, str):
+        lowered = raw_value.strip().lower()
+        if lowered in {'1', 'true', 'enabled', 'enable', 'active', 'on', 'normal'}:
+            return 1
+        if lowered in {'0', 'false', 'disabled', 'disable', 'inactive', 'off', 'forbidden'}:
+            return 0
+
+    return default
+
+
+def _resolve_roles_from_payload(data, *, required=True, allow_default=False):
+    """根据请求体解析角色列表，支持 role_ids / roles (ID) 或 role_keys。"""
+    raw_role_ids = data.get('roles')
+    if raw_role_ids is None:
+        raw_role_ids = data.get('role_ids')
+    raw_role_keys = data.get('role_keys')
+
+    if raw_role_ids is not None:
+        if not isinstance(raw_role_ids, list):
+            return None, JsonResponse({'message': 'roles 必须是数组'}, status=400)
+        normalized_ids = []
+        for value in raw_role_ids:
+            if value in (None, ''):
+                continue
+            try:
+                normalized_ids.append(int(value))
+            except (TypeError, ValueError):
+                return None, JsonResponse({'message': '角色ID必须是整数'}, status=400)
+        if not normalized_ids:
+            if required:
+                return None, JsonResponse({'message': '请至少选择一个角色'}, status=400)
+            return [], None
+
+        roles = list(Role.objects.filter(role_id__in=normalized_ids, status=1))
+        found_ids = {role.role_id for role in roles}
+        missing_ids = [role_id for role_id in normalized_ids if role_id not in found_ids]
+        if missing_ids:
+            return None, JsonResponse({'message': f'角色不存在或已禁用: {missing_ids}'}, status=400)
+        return roles, None
+
+    if raw_role_keys is not None:
+        if not isinstance(raw_role_keys, list):
+            return None, JsonResponse({'message': 'role_keys 必须是数组'}, status=400)
+        normalized_keys = [str(value).strip() for value in raw_role_keys if value]
+        if not normalized_keys:
+            if required:
+                return None, JsonResponse({'message': '请至少选择一个角色'}, status=400)
+            return [], None
+        roles = list(Role.objects.filter(role_key__in=normalized_keys, status=1))
+        found_keys = {role.role_key for role in roles}
+        missing_keys = [key for key in normalized_keys if key not in found_keys]
+        if missing_keys:
+            missing_text = ", ".join(missing_keys)
+            return None, JsonResponse({'message': f'角色不存在或已禁用: {missing_text}'}, status=400)
+        return roles, None
+
+    if allow_default:
+        default_role = Role.objects.filter(role_key='admin', status=1).first()
+        if not default_role:
+            default_role = Role.objects.filter(status=1).first()
+        if default_role:
+            return [default_role], None
+
+    if required:
+        return None, JsonResponse({'message': '请至少选择一个角色'}, status=400)
+    return [], None
 
 
 def _generate_token(user: AdminUser):
@@ -91,9 +171,8 @@ def _verify_password(raw_password: str, hashed_password: str) -> bool:
             return False
         return bcrypt.checkpw(raw_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
-    # 开发环境兜底，避免明文调试账号无法登录
-    return hashed_password == raw_password
-    #return False
+    # 不支持的密码格式
+    return False
 
 
 def dashboard_overview(request):
@@ -757,17 +836,192 @@ def list_roles(request):
     if request.method != 'GET':
         return JsonResponse({'message': 'Method not allowed'}, status=405)
 
-    roles = UserRole.objects.all()
+    roles = Role.objects.all().order_by('role_id')
     role_list = []
     for role in roles:
         role_list.append({
             'role_id': role.role_id,
             'role_name': role.role_name,
             'role_key': role.role_key,
+            'status': 1 if role.status else 0,
         })
-    print(f"Retrieved roles: {role_list}")
-
     return JsonResponse({'roles': role_list})
+
+
+@csrf_exempt
+def roles_view(request):
+    if request.method == 'GET':
+        return list_roles(request)
+    if request.method == 'POST':
+        return create_role(request)
+    if request.method == 'PUT':
+        return update_role(request)
+    return JsonResponse({'message': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+def create_role(request):
+    if request.method != 'POST':
+        return JsonResponse({'message': 'Method not allowed'}, status=405)
+
+    try:
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'message': '请求体必须是合法的 JSON'}, status=400)
+
+    role_name = (data.get('role_name') or '').strip()
+    role_key = (data.get('role_key') or '').strip()
+    status_value = _normalize_status_value(data.get('status'), 1)
+
+    if not role_name:
+        return JsonResponse({'message': '角色名称不能为空'}, status=400)
+    if not role_key:
+        return JsonResponse({'message': '角色标识不能为空'}, status=400)
+
+    if Role.objects.filter(role_key=role_key).exists():
+        return JsonResponse({'message': '角色标识已存在'}, status=400)
+
+    role = Role.objects.create(
+        role_name=role_name,
+        role_key=role_key,
+        status=status_value,
+    )
+
+    return JsonResponse({
+        'message': '角色创建成功',
+        'role': {
+            'role_id': role.role_id,
+            'role_name': role.role_name,
+            'role_key': role.role_key,
+            'status': role.status,
+        }
+    }, status=201)
+
+
+@csrf_exempt
+def update_role(request):
+    if request.method != 'PUT':
+        return JsonResponse({'message': 'Method not allowed'}, status=405)
+
+    try:
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'message': '请求体必须是合法的 JSON'}, status=400)
+
+    role_id = data.get('role_id')
+    if not role_id:
+        return JsonResponse({'message': '角色ID不能为空'}, status=400)
+
+    try:
+        role = Role.objects.get(role_id=role_id)
+    except Role.DoesNotExist:
+        return JsonResponse({'message': '角色不存在'}, status=404)
+
+    role_name = data.get('role_name')
+    role_key = data.get('role_key')
+    status_value = data.get('status')
+
+    if role_name is not None:
+        role_name = role_name.strip()
+        if not role_name:
+            return JsonResponse({'message': '角色名称不能为空'}, status=400)
+        role.role_name = role_name
+
+    if role_key is not None:
+        role_key = role_key.strip()
+        if not role_key:
+            return JsonResponse({'message': '角色标识不能为空'}, status=400)
+        if Role.objects.filter(role_key=role_key).exclude(role_id=role_id).exists():
+            return JsonResponse({'message': '角色标识已存在'}, status=400)
+        role.role_key = role_key
+
+    if status_value is not None:
+        role.status = _normalize_status_value(status_value, role.status)
+
+    role.save()
+
+    return JsonResponse({
+        'message': '角色更新成功',
+        'role': {
+            'role_id': role.role_id,
+            'role_name': role.role_name,
+            'role_key': role.role_key,
+            'status': role.status,
+        }
+    })
+
+
+@csrf_exempt
+def role_detail(request, role_id):
+    try:
+        role = Role.objects.get(role_id=role_id)
+    except Role.DoesNotExist:
+        return JsonResponse({'message': '角色不存在'}, status=404)
+
+    if request.method == 'GET':
+        return JsonResponse({
+            'role': {
+                'role_id': role.role_id,
+                'role_name': role.role_name,
+                'role_key': role.role_key,
+                'status': 1 if role.status else 0,
+            }
+        })
+
+    if request.method == 'DELETE':
+        RolePermission.objects.filter(role_id=role_id).delete()
+        UserRole.objects.filter(role_id=role_id).delete()
+        role.delete()
+        return JsonResponse({'message': '角色删除成功'})
+
+    return JsonResponse({'message': 'Method not allowed'}, status=405)
+
+
+@csrf_exempt
+def role_permissions(request, role_id):
+    try:
+        role = Role.objects.get(role_id=role_id)
+    except Role.DoesNotExist:
+        return JsonResponse({'message': '角色不存在'}, status=404)
+
+    if request.method == 'GET':
+        permissions = Permission.objects.filter(roles__role_id=role_id).distinct()
+        permission_list = [{'perm_key': perm.perm_key} for perm in permissions]
+        return JsonResponse({'permissions': permission_list})
+
+    if request.method == 'PUT':
+        try:
+            data = json.loads(request.body.decode('utf-8') or '{}')
+        except json.JSONDecodeError:
+            return JsonResponse({'message': '请求体必须是合法的 JSON'}, status=400)
+
+        perm_keys = data.get('permissions', [])
+        if perm_keys is None:
+            perm_keys = []
+        if not isinstance(perm_keys, list):
+            return JsonResponse({'message': '权限列表必须是数组'}, status=400)
+
+        normalized_keys = []
+        for key in perm_keys:
+            if not key:
+                continue
+            normalized_keys.append(str(key).strip())
+
+        permissions = list(Permission.objects.filter(perm_key__in=normalized_keys))
+        found_keys = {perm.perm_key for perm in permissions}
+        missing_keys = [key for key in normalized_keys if key not in found_keys]
+        if missing_keys:
+            return JsonResponse({'message': f'权限不存在: {", ".join(missing_keys)}'}, status=400)
+
+        RolePermission.objects.filter(role_id=role_id).delete()
+        RolePermission.objects.bulk_create([
+            RolePermission(role=role, permission=perm)
+            for perm in permissions
+        ])
+
+        return JsonResponse({'message': '角色权限更新成功'})
+
+    return JsonResponse({'message': 'Method not allowed'}, status=405)
 
 
 @csrf_exempt
@@ -778,10 +1032,20 @@ def list_admins(request):
     admins = AdminUser.objects.all()
     admin_list = []
     for admin in admins:
+        roles_qs = admin.roles.filter(status=1)
+        role_list = []
+        for role in roles_qs:
+            role_list.append({
+                'role_id': role.role_id,
+                'role_name': role.role_name,
+                'role_key': role.role_key,
+            })
+
         admin_list.append({
             'user_id': admin.user_id,
             'username': admin.username,
-            'roles': list(admin.roles.filter(status=1).values_list('role_key', flat=True)),
+            'roles': [item['role_key'] for item in role_list],
+            'role_list': role_list,
             'status': 'normal' if admin.status == 1 else 'frozen',
             'create_time': admin.create_time.strftime('%Y-%m-%d %H:%M:%S'),
             'phone': admin.phone,
@@ -811,34 +1075,8 @@ def admin_permissions(request, user_id):
 
         return JsonResponse({'permissions': permission_list})
 
-    # PUT: 修改管理员权限
-    elif request.method == 'PUT':
-        try:
-            data = json.loads(request.body.decode('utf-8') or '{}')
-        except json.JSONDecodeError:
-            return JsonResponse({'message': '请求体必须是合法的 JSON'}, status=400)
-
-        # 权限列表
-        perm_keys = data.get('permissions')
-        print(f"perm_keys:{perm_keys}")
-        # 获取对应权限列表的id
-        permission_ids = Permission.objects.filter(perm_key__in=perm_keys).values_list('id', flat=True)
-
-        # 删除当前管理员所关联的所有权限
-        # 1.先查询当前管理员对应的角色ID
-        role_ids = UserRole.objects.filter(user_id=user_id).values_list('role_id', flat=True)
-        # 2.删除这些角色对应的权限关联
-        RolePermission.objects.filter(role_id__in=role_ids).delete()
-        # 3.重新添加新的权限关联
-        for role_id in role_ids:
-            for permission_id in permission_ids:
-                RolePermission.objects.create(role_id=role_id, permission_id=permission_id)
-                print(f"Assigned permission ID {permission_id} to role ID {role_id} for admin user ID {user_id}")
-
-        return JsonResponse({'message': '管理员权限更新成功'})
-
     else:
-        return JsonResponse({'message': 'Method not allowed'}, status=405)
+        return JsonResponse({'message': '请在角色管理模块中分配权限'}, status=405)
     
 @csrf_exempt
 def admins_view(request):
@@ -850,6 +1088,7 @@ def admins_view(request):
         return update_admin(request)
     return JsonResponse({'message': 'Method not allowed'}, status=405)
 
+# TODO: 实现管理员查询接口
 @csrf_exempt
 def query_admins(request): 
     pass
@@ -868,27 +1107,33 @@ def create_admin(request):
     password = data.get('password', '').strip()
     phone = data.get('phone', '').strip()
     email = data.get('email', '').strip()
-    create_time = timezone.now()
 
     if not username:
         return JsonResponse({'message': '用户名不能为空'}, status=400)
     if not password:
         return JsonResponse({'message': '密码不能为空'}, status=400)
-    # 创建管理员用户，返回新用户ID
-    admin_user = AdminUser.objects.create(
-        username=username,
-        password=password,
-        status=1,
-        create_time=create_time,
-        phone=phone,
-        email=email
-    )
 
-    # 关联默认角色
-    UserRole.objects.create(
-        user_id=admin_user.user_id,
-        role_id=2 # 默认为普通管理员
-    )
+    # 加密密码
+    hashed_password = make_password(password)
+
+    roles, error_response = _resolve_roles_from_payload(data, required=True, allow_default=True)
+    if error_response:
+        return error_response
+
+    with transaction.atomic():
+        admin_user = AdminUser.objects.create(
+            username=username,
+            password=hashed_password,
+            status=1,
+            create_time=timezone.now(),
+            phone=phone,
+            email=email
+        )
+
+        UserRole.objects.bulk_create(
+            [UserRole(user=admin_user, role=role) for role in roles],
+            ignore_conflicts=True,
+        )
     
     return JsonResponse({'message': '管理员创建成功'}, status=201)
 
@@ -917,20 +1162,56 @@ def update_admin(request):
     phone = data.get('phone')
     email = data.get('email')
 
-    if username is not None:
-        admin_user.username = username.strip()
-    if password is not None:
-        admin_user.password = password.strip()
-    if status_value is not None:
-        admin_user.status = 1 if status_value == 'normal' else 0
-    if phone is not None:
-        admin_user.phone = phone.strip()
-    if email is not None:
-        admin_user.email = email.strip()
+    roles_payload_present = any(key in data for key in ('roles', 'role_ids', 'role_keys'))
+    new_roles = None
+    if roles_payload_present:
+        new_roles, error_response = _resolve_roles_from_payload(data, required=True, allow_default=False)
+        if error_response:
+            return error_response
 
-    admin_user.save()
+    with transaction.atomic():
+        if username is not None:
+            admin_user.username = username.strip()
+        if password is not None:
+            # 加密密码后存储
+            admin_user.password = make_password(password.strip())
+        if status_value is not None:
+            admin_user.status = 1 if status_value == 'normal' else 0
+        if phone is not None:
+            admin_user.phone = phone.strip()
+        if email is not None:
+            admin_user.email = email.strip()
+        admin_user.save()
+
+        if new_roles is not None:
+            UserRole.objects.filter(user=admin_user).delete()
+            UserRole.objects.bulk_create(
+                [UserRole(user=admin_user, role=role) for role in new_roles],
+                ignore_conflicts=True,
+            )
 
     return JsonResponse({'message': '管理员更新成功'})
+
+@csrf_exempt
+def reset_admin_password(request, user_id):
+    if request.method != 'PUT':
+        return JsonResponse({'message': 'Method not allowed'}, status=405)
+
+    try:
+        data = json.loads(request.body.decode('utf-8') or '{}')
+    except json.JSONDecodeError:
+        return JsonResponse({'message': '请求体必须是合法的 JSON'}, status=400)
+    
+    try:
+        admin_user = AdminUser.objects.get(user_id=user_id)
+    except AdminUser.DoesNotExist:
+        return JsonResponse({'message': '管理员不存在'}, status=404)
+
+    # 重置密码默认为123456（加密存储）
+    admin_user.password = make_password(DEFAULT_PASSWORD)
+    admin_user.save()
+
+    return JsonResponse({'message': '密码重置成功'}, status=200)
 
 @csrf_exempt
 def delete_admin(request, user_id):

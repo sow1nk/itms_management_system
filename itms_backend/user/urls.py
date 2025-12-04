@@ -30,12 +30,18 @@ urlpatterns = [
     path('devices/assign/<int:device_id>', views.assign_device, name='assign_device'),
     # 查询所有角色
     path('roles/list', views.list_roles, name='list_roles'),
+    # 角色增删改查
+    path('roles', views.roles_view, name='roles'),
+    path('roles/<int:role_id>', views.role_detail, name='role_detail'),
+    path('roles/<int:role_id>/permissions', views.role_permissions, name='role_permissions'),
     # 查询所有管理员
     path('admins/list', views.list_admins, name='list_admins'),
     # 查询/修改管理员权限
     path('admins/<int:user_id>/permissions', views.admin_permissions, name='admin_permissions'),
     # 新增/更新管理员 条件分页查询管理员
     path('admins', views.admins_view, name='admins'),
+    # 重置管理员用户密码
+    path('admins/reset_password/<int:user_id>', views.reset_admin_password, name='reset_admin_password'),
     # 删除管理员
     path('admins/<int:user_id>', views.delete_admin, name='delete_admin'),
     # 更新管理员账号状态

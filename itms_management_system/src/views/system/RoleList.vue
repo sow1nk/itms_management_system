@@ -8,6 +8,25 @@ import { PERMISSIONS, PERMISSION_TREE } from '@/utils/permission'
 const loading = ref(false)
 const roles = ref([])
 
+const normalizeRoleStatus = (status) => {
+  if (typeof status === 'number') {
+    return status === 0 ? 0 : 1
+  }
+  if (typeof status === 'boolean') {
+    return status ? 1 : 0
+  }
+  if (typeof status === 'string') {
+    const lowered = status.toLowerCase()
+    if (['0', 'false', 'disabled', 'inactive', 'off'].includes(lowered)) {
+      return 0
+    }
+    if (['1', 'true', 'enabled', 'active', 'on', 'normal'].includes(lowered)) {
+      return 1
+    }
+  }
+  return 1
+}
+
 // 使用权限 composable
 const { can } = usePermission()
 
@@ -16,15 +35,17 @@ const createDialogVisible = ref(false)
 const createFormRef = ref()
 const createForm = ref({
   role_name: '',
-  description: '',
+  role_key: '',
 })
 const createFormRules = {
   role_name: [
     { required: true, message: '请输入角色名称', trigger: 'blur' },
     { min: 2, max: 50, message: '角色名称长度在 2 到 50 个字符', trigger: 'blur' },
   ],
-  description: [
-    { max: 200, message: '描述长度不能超过 200 个字符', trigger: 'blur' },
+  role_key: [
+    { required: true, message: '请输入角色标识', trigger: 'blur' },
+    { min: 2, max: 50, message: '角色标识长度在 2 到 50 个字符', trigger: 'blur' },
+    { pattern: /^[a-zA-Z0-9_]+$/, message: '角色标识只能包含字母、数字和下划线', trigger: 'blur' },
   ],
 }
 const createLoading = ref(false)
@@ -35,15 +56,17 @@ const editFormRef = ref()
 const editForm = ref({
   role_id: null,
   role_name: '',
-  description: '',
+  role_key: '',
 })
 const editFormRules = {
   role_name: [
     { required: true, message: '请输入角色名称', trigger: 'blur' },
     { min: 2, max: 50, message: '角色名称长度在 2 到 50 个字符', trigger: 'blur' },
   ],
-  description: [
-    { max: 200, message: '描述长度不能超过 200 个字符', trigger: 'blur' },
+  role_key: [
+    { required: true, message: '请输入角色标识', trigger: 'blur' },
+    { min: 2, max: 50, message: '角色标识长度在 2 到 50 个字符', trigger: 'blur' },
+    { pattern: /^[a-zA-Z0-9_]+$/, message: '角色标识只能包含字母、数字和下划线', trigger: 'blur' },
   ],
 }
 const editLoading = ref(false)
@@ -63,7 +86,12 @@ const loadData = async () => {
     console.log('角色列表数据:', data)
 
     if (data && data.roles) {
-      roles.value = data.roles
+      roles.value = data.roles.map(role => ({
+        ...role,
+        status: normalizeRoleStatus(role.status),
+      }))
+    } else {
+      roles.value = []
     }
 
     console.log('角色数据:', roles.value)
@@ -77,12 +105,17 @@ const loadData = async () => {
 
 onMounted(loadData)
 
+// 检查是否为超级管理员角色
+const isSuperAdminRole = (row) => {
+  return row.role_key === 'super_admin'
+}
+
 // 打开新增角色对话框
 const handleCreate = () => {
   createDialogVisible.value = true
   createForm.value = {
     role_name: '',
-    description: '',
+    role_key: '',
   }
   nextTick(() => {
     createFormRef.value?.clearValidate()
@@ -98,7 +131,7 @@ const handleCreateSubmit = async () => {
   try {
     await createRole({
       role_name: createForm.value.role_name,
-      description: createForm.value.description || null,
+      role_key: createForm.value.role_key,
     })
 
     ElMessage.success('角色创建成功')
@@ -118,7 +151,7 @@ const handleEdit = (row) => {
   editForm.value = {
     role_id: row.role_id,
     role_name: row.role_name,
-    description: row.description || '',
+    role_key: row.role_key || '',
   }
   nextTick(() => {
     editFormRef.value?.clearValidate()
@@ -135,7 +168,7 @@ const handleEditSubmit = async () => {
     await updateRole({
       role_id: editForm.value.role_id,
       role_name: editForm.value.role_name,
-      description: editForm.value.description || null,
+      role_key: editForm.value.role_key,
     })
 
     ElMessage.success('角色信息更新成功')
@@ -167,6 +200,42 @@ const handleDelete = async (row) => {
       }
     })
     .catch(() => {})
+}
+
+const handleStatusChange = async (row, value) => {
+  // 双重保护：即使 switch 没被禁用，也要检查权限
+  if (isSuperAdminRole(row)) {
+    // 恢复原状态
+    row.status = value === 1 ? 0 : 1
+    ElMessage.warning('超级管理员角色不可禁用')
+    return
+  }
+
+  const action = value === 1 ? '启用' : '禁用'
+  ElMessageBox.confirm(`确认${action}该角色吗？`, '操作确认', {
+    confirmButtonText: '确定',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
+    .then(async () => {
+      try {
+        await updateRole({
+          role_id: row.role_id,
+          status: value,
+        })
+        row.status = value
+        ElMessage.success(`角色已${action}`)
+      } catch (error) {
+        console.error('更新角色状态失败:', error)
+        ElMessage.error('更新角色状态失败，请稍后重试')
+        // 失败时恢复原状态
+        row.status = value === 1 ? 0 : 1
+      }
+    })
+    .catch(() => {
+      // 用户取消，恢复原状态
+      row.status = value === 1 ? 0 : 1
+    })
 }
 
 // 处理分配权限
@@ -249,12 +318,30 @@ const handlePermissionSubmit = async () => {
     <el-table :data="roles" v-loading="loading" border stripe>
       <el-table-column label="角色 ID" prop="role_id" min-width="100"/>
       <el-table-column label="角色名称" prop="role_name" min-width="160" />
-      <el-table-column label="描述" prop="description" min-width="240">
+      <el-table-column label="角色标识" prop="role_key" min-width="160" />
+      <el-table-column label="状态" min-width="140">
         <template #default="{ row }">
-          <span>{{ row.description || '-' }}</span>
+          <div class="status-cell">
+            <el-switch
+              v-model="row.status"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="启用"
+              inactive-text="禁用"
+              :disabled="!can(PERMISSIONS.SYSTEM_ROLE.UPDATE) || isSuperAdminRole(row)"
+              @change="(value) => handleStatusChange(row, value)"
+            />
+            <el-tooltip v-if="isSuperAdminRole(row)" placement="top">
+              <template #content>
+                <span>超级管理员角色不可禁用</span>
+              </template>
+              <el-icon style="margin-left: 4px; color: #909399;">
+                <InfoFilled />
+              </el-icon>
+            </el-tooltip>
+          </div>
         </template>
       </el-table-column>
-      <el-table-column label="创建时间" prop="create_time" min-width="160" />
 
       <el-table-column label="操作" min-width="280" fixed="right">
         <template #default="{ row }">
@@ -382,13 +469,11 @@ const handlePermissionSubmit = async () => {
           clearable
         />
       </el-form-item>
-      <el-form-item label="描述" prop="description">
+      <el-form-item label="角色标识" prop="role_key">
         <el-input
-          v-model="createForm.description"
-          type="textarea"
-          :rows="3"
-          placeholder="请输入角色描述（选填）"
-          maxlength="200"
+          v-model="createForm.role_key"
+          placeholder="请输入角色标识，例如 super_admin"
+          maxlength="50"
           show-word-limit
           clearable
         />
@@ -402,6 +487,7 @@ const handlePermissionSubmit = async () => {
         <template #title>
           <div style="font-size: 13px">
             <div>· 角色名称：2-50个字符</div>
+            <div>· 角色标识：仅限字母/数字/下划线，建议全局唯一</div>
             <div>· 新建角色默认没有任何权限，需要单独分配</div>
           </div>
         </template>
@@ -444,13 +530,11 @@ const handlePermissionSubmit = async () => {
           clearable
         />
       </el-form-item>
-      <el-form-item label="描述" prop="description">
+      <el-form-item label="角色标识" prop="role_key">
         <el-input
-          v-model="editForm.description"
-          type="textarea"
-          :rows="3"
-          placeholder="请输入角色描述（选填）"
-          maxlength="200"
+          v-model="editForm.role_key"
+          placeholder="请输入角色标识"
+          maxlength="50"
           show-word-limit
           clearable
         />
@@ -490,6 +574,12 @@ const handlePermissionSubmit = async () => {
   margin: 0;
   color: #909399;
   font-size: 14px;
+}
+
+.status-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .action-buttons {

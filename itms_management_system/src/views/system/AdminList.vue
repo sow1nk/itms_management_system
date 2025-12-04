@@ -1,13 +1,16 @@
 <script setup>
 import { ref, onMounted, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { queryAllAdmins, queryAdminPermissions, updateAdminPermissions, createAdmin, updateAdmin, deleteAdmin, updateAdminStatus } from '@/api/modules/admins'
+import { queryAllAdmins, createAdmin, updateAdmin, deleteAdmin, updateAdminStatus, resetAdminPassword } from '@/api/modules/admins'
+import { queryAllRoles } from '@/api/modules/roles'
 import { useUserStore } from '@/store/modules/user'
 import { usePermission } from '@/composables/usePermission'
-import { PERMISSIONS, PERMISSION_TREE } from '@/utils/permission'
+import { PERMISSIONS } from '@/utils/permission'
 
 const loading = ref(false)
 const admins = ref([])
+const roleOptions = ref([])
+const roleOptionsLoading = ref(false)
 const userStore = useUserStore()
 
 // 使用权限 composable
@@ -15,7 +18,6 @@ const { can } = usePermission()
 
 // 获取当前登录用户信息
 const currentUser = computed(() => userStore.name)
-const currentUserRoles = computed(() => userStore.roles || [])
 
 // 新增管理员相关
 const createDialogVisible = ref(false)
@@ -25,6 +27,7 @@ const createForm = ref({
   password: '',
   phone: '',
   email: '',
+  role_id: null,
 })
 const createFormRules = {
   username: [
@@ -44,6 +47,9 @@ const createFormRules = {
     { required: true, message: '请输入邮箱', trigger: 'blur' },
     { type: 'email', message: '请输入正确的邮箱地址', trigger: 'blur' },
   ],
+  role_id: [
+    { required: true, message: '请选择角色', trigger: 'change' },
+  ],
 }
 const createLoading = ref(false)
 
@@ -55,6 +61,7 @@ const editForm = ref({
   username: '',
   phone: '',
   email: '',
+  role_id: null,
 })
 const editFormRules = {
   username: [
@@ -68,15 +75,12 @@ const editFormRules = {
   email: [
     { type: 'email', message: '请输入正确的邮箱地址', trigger: 'blur' },
   ],
+  role_id: [
+    { required: true, message: '请选择角色', trigger: 'change' },
+  ],
 }
 const editLoading = ref(false)
 
-// 权限分配相关
-const permissionDialogVisible = ref(false)
-const permissionLoading = ref(false)
-const currentPermissionAdmin = ref(null)
-const permissionTreeRef = ref()
-const checkedPermissions = ref([])
 
 const normalizeStatus = (status) => {
   if (typeof status === 'boolean') {
@@ -102,6 +106,72 @@ const normalizeStatus = (status) => {
   return 'normal'
 }
 
+const normalizeRoleList = (admin) => {
+  // 优先使用 role_list（结构化的角色数据）
+  if (Array.isArray(admin.role_list) && admin.role_list.length > 0) {
+    return admin.role_list.map(role => ({
+      role_id: role.role_id,
+      role_key: role.role_key,
+      role_name: role.role_name || role.role_key?.replace(/_/g, ' '),
+    }))
+  }
+
+  // 从 roles 和 role_ids 数组构建角色列表
+  if (Array.isArray(admin.roles) && admin.roles.length > 0) {
+    return admin.roles.map((roleKey, index) => ({
+      role_id: admin.role_ids?.[index] || null,
+      role_key: roleKey,
+      role_name: roleKey.replace(/_/g, ' '),
+    }))
+  }
+
+  return []
+}
+
+const loadRoleOptions = async () => {
+  roleOptionsLoading.value = true
+  try {
+    const data = await queryAllRoles()
+    const options = (data?.roles || []).map(role => ({
+      ...role,
+      disabled: role.status !== 1,
+      label: `${role.role_name} (${role.role_key})`,
+    }))
+    roleOptions.value = options
+  } catch (error) {
+    console.error('加载角色列表失败:', error)
+    ElMessage.error('加载角色列表失败')
+  } finally {
+    roleOptionsLoading.value = false
+  }
+}
+
+const extractPrimaryRoleId = (roleList = []) => {
+  if (!Array.isArray(roleList) || roleList.length === 0) {
+    return null
+  }
+  const target = roleList[0]
+  return target?.role_id ?? null
+}
+
+const hasRoleKey = (row, targetKey) => {
+  return (row.role_list || []).some(role => role.role_key === targetKey)
+}
+
+// 检查是否为超级管理员
+const isSuperAdmin = (row) => {
+  return hasRoleKey(row, 'super_admin')
+}
+
+const getRoleTagType = (roleKey) => {
+  const map = {
+    super_admin: 'danger',
+    admin: 'warning',
+    operator: '',
+  }
+  return map[roleKey] || 'info'
+}
+
 const loadData = async () => {
   loading.value = true
   try {
@@ -111,16 +181,15 @@ const loadData = async () => {
     // 从返回的数据中提取 admins 数组，并转换数据格式
     if (data && data.admins) {
       admins.value = data.admins.map(admin => {
-        const normalizedRole = admin.roles && admin.roles.length > 0
-          ? admin.roles[0].replace(/_/g, '-') // super_admin -> super-admin
-          : 'operator'
-
+        const roleList = normalizeRoleList(admin)
         return {
           ...admin,
-          role: normalizedRole,
+          role_list: roleList,
           status: normalizeStatus(admin.status),
         }
       })
+    } else {
+      admins.value = []
     }
 
     console.log('转换后的管理员数据:', admins.value)
@@ -129,12 +198,10 @@ const loadData = async () => {
   }
 }
 
-onMounted(loadData)
-
-// 检查是否为超级管理员
-const isSuperAdmin = (row) => {
-  return row.role === 'super-admin' || row.role === '超级管理员'
-}
+onMounted(() => {
+  loadRoleOptions()
+  loadData()
+})
 
 // 检查是否为当前用户
 const isCurrentUser = (row) => {
@@ -227,7 +294,7 @@ const handleDelete = async (row) => {
 // 重置密码
 const handleResetPassword = (row) => {
   ElMessageBox.confirm(
-    `确定要重置管理员 ${row.username} 的密码吗？重置后将发送新密码到其注册邮箱。`,
+    `确定要重置管理员 ${row.username} 的密码吗？`,
     '重置密码',
     {
       confirmButtonText: '确定重置',
@@ -235,11 +302,14 @@ const handleResetPassword = (row) => {
       type: 'warning',
     }
   )
-    .then(() => {
-      // 模拟重置密码
-      ElMessage.success('密码已重置，新密码已发送至管理员邮箱 (mock)')
+    .then(async () => {
+      try{
+        await resetAdminPassword(row.user_id)
+        ElMessage.success('密码重置成功')
+      } catch (error) {
+        ElMessage.error('密码重置失败，请稍后重试')
+      }
     })
-    .catch(() => {})
 }
 
 // 打开编辑管理员对话框
@@ -251,6 +321,7 @@ const handleEdit = (row) => {
     username: row.username,
     phone: row.phone || '',
     email: row.email || '',
+    role_id: extractPrimaryRoleId(row.role_list || []),
   }
   // 清除表单验证
   nextTick(() => {
@@ -266,12 +337,12 @@ const handleEditSubmit = async () => {
 
   editLoading.value = true
   try {
-    // 调用接口更新管理员信息
     await updateAdmin({
       user_id: editForm.value.user_id,
       username: editForm.value.username,
       phone: editForm.value.phone || null,
       email: editForm.value.email || null,
+      roles: editForm.value.role_id ? [editForm.value.role_id] : [],
     })
 
     ElMessage.success('管理员信息更新成功')
@@ -296,6 +367,7 @@ const handleCreate = () => {
     password: '',
     phone: '',
     email: '',
+    role_id: null,
   }
   // 清除表单验证
   nextTick(() => {
@@ -311,22 +383,12 @@ const handleCreateSubmit = async () => {
 
   createLoading.value = true
   try {
-    // 生成当前时间 (格式: YYYY-MM-DD HH:mm:ss)
-    const now = new Date()
-    const create_time = now.getFullYear() + '-' +
-      String(now.getMonth() + 1).padStart(2, '0') + '-' +
-      String(now.getDate()).padStart(2, '0') + ' ' +
-      String(now.getHours()).padStart(2, '0') + ':' +
-      String(now.getMinutes()).padStart(2, '0') + ':' +
-      String(now.getSeconds()).padStart(2, '0')
-
-    // 调用接口创建管理员
     await createAdmin({
       username: createForm.value.username,
       password: createForm.value.password,
       phone: createForm.value.phone,
       email: createForm.value.email,
-      create_time,
+      roles: createForm.value.role_id ? [createForm.value.role_id] : [],
     })
 
     ElMessage.success('管理员创建成功')
@@ -342,106 +404,6 @@ const handleCreateSubmit = async () => {
   }
 }
 
-// 格式化角色显示
-const formatRole = (role) => {
-  const roleMap = {
-    'super-admin': '超级管理员',
-    'admin': '管理员',
-    'operator': '操作员',
-  }
-  return roleMap[role] || role
-}
-
-// 获取角色标签类型
-const getRoleTagType = (role) => {
-  const typeMap = {
-    'super-admin': 'danger',
-    'admin': 'warning',
-    'operator': '',
-  }
-  return typeMap[role] || 'info'
-}
-
-// 处理分配权限
-const handleAssignPermissions = async (row) => {
-  currentPermissionAdmin.value = row
-  permissionDialogVisible.value = true
-  permissionLoading.value = true
-
-  try {
-    // 判断是否为超级管理员
-    if (isSuperAdmin(row)) {
-      // 超级管理员：自动拥有所有权限
-      const allPermissionKeys = []
-      PERMISSION_TREE.forEach((module) => {
-        if (module.children) {
-          module.children.forEach((child) => {
-            allPermissionKeys.push(child.id)
-          })
-        } else {
-          allPermissionKeys.push(module.id)
-        }
-      })
-      checkedPermissions.value = allPermissionKeys
-      console.log('超级管理员，拥有全部权限:', checkedPermissions.value)
-    } else {
-      // 普通管理员：调用接口获取权限
-      const response = await queryAdminPermissions(row.user_id)
-      console.log('管理员当前权限:', response)
-
-      // 从返回的数据中提取 perm_key
-      if (response && response.permissions && Array.isArray(response.permissions)) {
-        checkedPermissions.value = response.permissions.map(item => item.perm_key).filter(Boolean)
-        console.log('转换后的权限列表:', checkedPermissions.value)
-      } else {
-        checkedPermissions.value = []
-      }
-    }
-
-    // 等待 DOM 更新后设置选中的权限
-    await nextTick()
-    permissionTreeRef.value?.setCheckedKeys(checkedPermissions.value)
-  } catch (error) {
-    console.error(error)
-    ElMessage.error('获取管理员权限失败')
-  } finally {
-    permissionLoading.value = false
-  }
-}
-
-// 提交权限分配
-const handlePermissionSubmit = async () => {
-  if (!currentPermissionAdmin.value) return
-
-  permissionLoading.value = true
-  try {
-    // 获取选中的权限（包括半选中的父节点）
-    const checkedKeys = permissionTreeRef.value.getCheckedKeys()
-    const halfCheckedKeys = permissionTreeRef.value.getHalfCheckedKeys()
-    const allPermissions = [...checkedKeys, ...halfCheckedKeys]
-
-    // 过滤掉分组节点（带 _group 后缀的），只保留真实权限（三段式格式）
-    const validPermissions = allPermissions.filter(perm => {
-      // 真实权限格式：module:function:action（包含两个冒号）
-      return perm && perm.includes(':') && !perm.endsWith('_group')
-    })
-
-    console.log('保存管理员权限:', {
-      adminId: currentPermissionAdmin.value.user_id,
-      permissions: validPermissions,
-    })
-
-    // 调用接口保存权限
-    await updateAdminPermissions(currentPermissionAdmin.value.user_id, validPermissions)
-    ElMessage.success('权限分配成功')
-    permissionDialogVisible.value = false
-  } catch (error) {
-    console.error(error)
-    ElMessage.error('权限分配失败，请稍后重试')
-  } finally {
-    permissionLoading.value = false
-  }
-}
 </script>
 
 <template>
@@ -457,7 +419,7 @@ const handlePermissionSubmit = async () => {
       </el-button>
     </div>
 
-    <el-table :data="admins" v-loading="loading" border stripe>
+    <el-table :data="admins" v-loading="loading" border stripe row-key="user_id">
       <!-- 账号列 - 用于登录的账号名 -->
       <el-table-column label="用户 ID" prop="user_id" min-width="140"/>
 
@@ -465,16 +427,24 @@ const handlePermissionSubmit = async () => {
       <el-table-column label="用户名" prop="username" min-width="140" />
 
       <!-- 角色列 -->
-      <el-table-column label="角色" prop="role" min-width="140">
+      <el-table-column label="角色" min-width="220">
         <template #default="{ row }">
-          <el-tag :type="getRoleTagType(row.role)" effect="plain">
-            {{ formatRole(row.role) }}
-          </el-tag>
-          <el-tooltip v-if="isSuperAdmin(row)" content="系统最高权限，不可删除或禁用" placement="top">
-            <el-icon style="margin-left: 4px; color: #e6a23c;">
-              <Warning />
-            </el-icon>
-          </el-tooltip>
+          <div class="role-tags">
+            <template v-for="(role, index) in row.role_list" :key="role.role_key || role.role_id || `role-${index}`">
+              <el-tag
+                :type="getRoleTagType(role.role_key)"
+                effect="plain"
+              >
+                {{ role.role_name || role.role_key }}
+              </el-tag>
+            </template>
+            <span v-if="!row.role_list || !row.role_list.length">-</span>
+            <el-tooltip v-if="isSuperAdmin(row)" content="系统最高权限，不可删除或禁用" placement="top">
+              <el-icon style="margin-left: 4px; color: #e6a23c;">
+                <Warning />
+              </el-icon>
+            </el-tooltip>
+          </div>
         </template>
       </el-table-column>
 
@@ -522,7 +492,7 @@ const handlePermissionSubmit = async () => {
       </el-table-column>
 
       <!-- 操作列 -->
-      <el-table-column label="操作" min-width="340" fixed="right">
+      <el-table-column label="操作" min-width="300" fixed="right">
         <template #default="{ row }">
           <div class="action-buttons">
             <!-- 编辑按钮 -->
@@ -535,18 +505,6 @@ const handlePermissionSubmit = async () => {
             >
               <el-icon><Edit /></el-icon>
               编辑
-            </el-button>
-
-            <!-- 分配权限按钮 -->
-            <el-button
-              type="warning"
-              link
-              size="small"
-              :disabled="!can(PERMISSIONS.SYSTEM_ADMIN.ASSIGN_PERMISSIONS)"
-              @click="handleAssignPermissions(row)"
-            >
-              <el-icon><Key /></el-icon>
-              分配权限
             </el-button>
 
             <!-- 重置密码按钮 -->
@@ -589,74 +547,6 @@ const handlePermissionSubmit = async () => {
       </el-table-column>
     </el-table>
   </el-card>
-
-  <!-- 权限分配对话框 -->
-  <el-dialog
-    v-model="permissionDialogVisible"
-    title="分配权限"
-    width="600px"
-    destroy-on-close
-  >
-    <div v-loading="permissionLoading" style="min-height: 200px">
-      <el-form label-width="100px">
-        <el-form-item label="用户 ID">
-          <span>{{ currentPermissionAdmin?.user_id }}</span>
-        </el-form-item>
-        <el-form-item label="用户名">
-          <span>{{ currentPermissionAdmin?.username }}</span>
-        </el-form-item>
-        <el-form-item label="角色">
-          <el-tag :type="getRoleTagType(currentPermissionAdmin?.role)">
-            {{ formatRole(currentPermissionAdmin?.role) }}
-          </el-tag>
-        </el-form-item>
-        <el-form-item label="功能权限">
-          <div class="permission-tree-container">
-            <el-tree
-              ref="permissionTreeRef"
-              :data="PERMISSION_TREE"
-              show-checkbox
-              node-key="id"
-              :props="{ children: 'children', label: 'label' }"
-              default-expand-all
-              :check-strictly="false"
-            >
-              <template #default="{ node, data }">
-                <span class="custom-tree-node">
-                  <span :class="{ 'tree-parent-node': data.children && data.children.length > 0 }">
-                    {{ node.label }}
-                  </span>
-                </span>
-              </template>
-            </el-tree>
-          </div>
-        </el-form-item>
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          style="margin-top: 12px"
-        >
-          <template #title>
-            <div style="font-size: 13px">
-              <div>· 勾选父节点将自动勾选所有子权限</div>
-              <div>· 超级管理员默认拥有所有权限</div>
-            </div>
-          </template>
-        </el-alert>
-      </el-form>
-    </div>
-    <template #footer>
-      <el-button @click="permissionDialogVisible = false">取 消</el-button>
-      <el-button
-        type="primary"
-        :loading="permissionLoading"
-        @click="handlePermissionSubmit"
-      >
-        保 存
-      </el-button>
-    </template>
-  </el-dialog>
 
   <!-- 新增管理员对话框 -->
   <el-dialog
@@ -707,6 +597,23 @@ const handlePermissionSubmit = async () => {
           clearable
         />
       </el-form-item>
+      <el-form-item label="角色" prop="role_id">
+        <el-select
+          v-model="createForm.role_id"
+          filterable
+          placeholder="请选择角色"
+          :loading="roleOptionsLoading"
+          style="width: 100%;"
+        >
+          <el-option
+            v-for="role in roleOptions"
+            :key="role.role_id"
+            :label="role.label"
+            :value="role.role_id"
+            :disabled="role.status !== 1"
+          />
+        </el-select>
+      </el-form-item>
       <el-alert
         type="info"
         :closable="false"
@@ -717,7 +624,7 @@ const handlePermissionSubmit = async () => {
           <div style="font-size: 13px">
             <div>· 用户名：3-20个字符，仅支持字母、数字、下划线</div>
             <div>· 密码：6-20个字符</div>
-            <div>· 新建管理员默认为普通操作员角色</div>
+            <div>· 至少选择一个角色，角色决定可访问的功能</div>
           </div>
         </template>
       </el-alert>
@@ -775,6 +682,23 @@ const handlePermissionSubmit = async () => {
           clearable
         />
       </el-form-item>
+      <el-form-item label="角色" prop="role_id">
+        <el-select
+          v-model="editForm.role_id"
+          filterable
+          placeholder="请选择角色"
+          :loading="roleOptionsLoading"
+          style="width: 100%;"
+        >
+          <el-option
+            v-for="role in roleOptions"
+            :key="role.role_id"
+            :label="role.label"
+            :value="role.role_id"
+            :disabled="role.status !== 1"
+          />
+        </el-select>
+      </el-form-item>
       <el-alert
         type="info"
         :closable="false"
@@ -785,6 +709,7 @@ const handlePermissionSubmit = async () => {
           <div style="font-size: 13px">
             <div>· 用户名：3-20个字符，仅支持字母、数字、下划线</div>
             <div>· 手机号和邮箱为选填项，可留空</div>
+            <div>· 角色修改后，重新登录即可生效</div>
           </div>
         </template>
       </el-alert>
@@ -844,6 +769,18 @@ const handlePermissionSubmit = async () => {
   flex-wrap: wrap;
 }
 
+.role-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-height: 32px;
+}
+
+.role-tags .el-tag {
+  transition: none;
+}
+
 /* Switch 样式优化 */
 :deep(.el-switch.is-disabled) {
   opacity: 0.6;
@@ -868,40 +805,12 @@ const handlePermissionSubmit = async () => {
   background-color: #f5f7fa;
 }
 
-/* 权限树样式 */
-.permission-tree-container {
-  width: 100%;
-  max-height: 400px;
-  overflow-y: auto;
-  padding: 12px;
-  background-color: #f9fbff;
-  border-radius: 8px;
-  border: 1px solid #e4e7ed;
+/* 禁用表格单元格的过渡效果，防止内容位移 */
+:deep(.el-table__body td) {
+  transition: none !important;
 }
 
-.permission-tree-container :deep(.el-tree) {
-  background-color: transparent;
-}
-
-.permission-tree-container :deep(.el-tree-node__content) {
-  height: 36px;
-  margin: 2px 0;
-  border-radius: 4px;
-}
-
-.permission-tree-container :deep(.el-tree-node__content:hover) {
-  background-color: #f0f2f5;
-}
-
-.custom-tree-node {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  font-size: 14px;
-}
-
-.tree-parent-node {
-  font-weight: 600;
-  color: #303133;
+:deep(.el-table__body .cell) {
+  transition: none !important;
 }
 </style>

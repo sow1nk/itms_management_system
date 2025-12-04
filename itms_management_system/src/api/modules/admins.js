@@ -10,18 +10,6 @@ export function queryAllAdmins() {
   return request.get('/admins/list')
 }
 
-// 查询权限列表
-export function queryAdminPermissions(adminId) {
-  return request.get(`/admins/${adminId}/permissions`)
-}
-
-// 更新管理员权限
-export function updateAdminPermissions(adminId, permissions) {
-  return request.put(`/admins/${adminId}/permissions`, {
-    permissions,
-  })
-}
-
 // 新增管理员
 export function createAdmin(data) {
   return request.post('/admins', data)
@@ -42,4 +30,9 @@ export function updateAdminStatus(adminId, status) {
   return request.put(`/admins/status/${adminId}`, {
     status,
   })
+}
+
+// 重置管理员密码
+export function resetAdminPassword(adminId) {
+  return request.put(`/admins/reset_password/${adminId}`)
 }
